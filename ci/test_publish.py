@@ -1,0 +1,130 @@
+"""Check publication boundaries with a fixture CLI; never contact a server."""
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+
+PUBLISH = Path(__file__).resolve().with_name('publish.sh')
+
+
+class PublishTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        tools = self.root / 'bin'
+        tools.mkdir()
+        self.log = self.root / 'calls.jsonl'
+        self.env = dict(os.environ, PATH=str(tools) + os.pathsep + os.environ['PATH'],
+                        GITHUB_EVENT_NAME='push', GITHUB_REF='refs/heads/release/1.0.1',
+                        CONAN_LOGIN_USERNAME='fixture', CONAN_PASSWORD='fixture',
+                        CONAN_LOGIN_USERNAME_KTH='fixture', CONAN_PASSWORD_KTH='fixture',
+                        CONAN_HOME=str(self.root / 'initial-cache'),
+                        FIXTURE_LOG=str(self.log))
+        program = '''import json, os, sys
+from pathlib import Path
+args = sys.argv[1:]
+credentials = [k for k in os.environ if k.startswith(('CONAN_LOGIN_USERNAME', 'CONAN_PASSWORD'))]
+record = {'command': args[0], 'subcommand': args[1], 'credentials_present': bool(credentials), 'home': os.environ['CONAN_HOME']}
+if args[0] == 'create':
+    assert '--version' not in args, 'The recipe must take the version from the project'
+if args[0] in ('install', 'test'):
+    assert not credentials, 'Credentials reached anonymous verification'
+    assert '-cc' in args and 'core:non_interactive=True' in args, 'Interactive authentication is enabled'
+    assert '--build=never' in args
+    assert any('parlaylib/1.0.1#fixture-revision' in arg for arg in args)
+with open(os.environ['FIXTURE_LOG'], 'a') as log:
+    log.write(json.dumps(record) + '\\n')
+if args[0] == 'inspect':
+    print(json.dumps({'name': 'parlaylib', 'version': os.environ.get('PROJECT_VERSION', '1.0.1')}))
+if args[0] == 'list':
+    print(json.dumps({'Local Cache': {'parlaylib/1.0.1': {'revisions': {'fixture-revision': {}}}}}))
+if args[0] == 'install':
+    attempts = sum(json.loads(line)['command'] == 'install' for line in open(os.environ['FIXTURE_LOG']))
+    if os.environ.get('FAIL_ANONYMOUS') or attempts <= int(os.environ.get('FAIL_ANONYMOUS_UNTIL', '0')):
+        sys.exit(17)
+if args[0] == 'test' and os.environ.get('FAIL_CONSUMER'):
+    sys.exit(19)
+'''
+        executable = tools / 'conan'
+        executable.write_text('#!' + sys.executable + '\n' + program)
+        executable.chmod(0o755)
+        # Model propagation delays without making unit tests sleep.
+        sleep = tools / 'sleep'
+        sleep.write_text('#!/bin/sh\nexit 0\n')
+        sleep.chmod(0o755)
+
+    def run_publish(self, **overrides):
+        return subprocess.run(['bash', str(PUBLISH)], cwd=self.root,
+                              env=dict(self.env, **overrides),
+                              capture_output=True, text=True, timeout=30)
+
+    def calls(self):
+        return [json.loads(line) for line in self.log.read_text().splitlines()]
+
+    def test_exact_revision_uses_fresh_anonymous_cache(self):
+        result = self.run_publish()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.calls()
+        anonymous = [c for c in calls if c['command'] in ('install', 'test')]
+        self.assertEqual([c['command'] for c in anonymous], ['install', 'test'])
+        self.assertTrue(next(c for c in calls if c['command'] == 'upload')['credentials_present'])
+        for call in anonymous:
+            self.assertFalse(call['credentials_present'])
+            self.assertNotEqual(call['home'], self.env['CONAN_HOME'])
+            self.assertFalse(Path(call['home']).exists(), 'Temporary cache was not cleaned')
+
+    def test_branch_must_name_the_project_version(self):
+        result = self.run_publish(PROJECT_VERSION='1.0.0')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('does not match project version 1.0.0', result.stderr)
+        calls = self.calls()
+        self.assertEqual(calls[-1]['command'], 'inspect')
+        for call in calls:
+            self.assertNotIn(call['command'], ('create', 'upload', 'install', 'test'))
+            self.assertNotEqual((call['command'], call['subcommand']), ('remote', 'login'))
+
+    def test_anonymous_download_failure_fails_publication(self):
+        result = self.run_publish(FAIL_ANONYMOUS='1')
+        self.assertNotEqual(result.returncode, 0)
+        calls = self.calls()
+        self.assertEqual(calls[-1]['command'], 'install')
+        self.assertNotIn('test', [c['command'] for c in calls])
+        self.assertEqual(sum(c['command'] == 'install' for c in calls), 12)
+        self.assertIn('after 12 attempts', result.stderr)
+
+    def test_consumer_failure_is_not_retried(self):
+        result = self.run_publish(FAIL_CONSUMER='1')
+        self.assertEqual(result.returncode, 19)
+        calls = self.calls()
+        self.assertEqual(sum(c['command'] == 'install' for c in calls), 1)
+        self.assertEqual(sum(c['command'] == 'test' for c in calls), 1)
+
+    def test_public_index_propagation_retries_stay_anonymous(self):
+        result = self.run_publish(FAIL_ANONYMOUS_UNTIL='2')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.calls()
+        installs = [c for c in calls if c['command'] == 'install']
+        self.assertEqual(len(installs), 3)
+        self.assertTrue(all(not c['credentials_present'] for c in installs))
+        self.assertEqual(sum(c['command'] == 'test' for c in calls), 1)
+        self.assertEqual(sum(c['command'] == 'upload' for c in calls), 1)
+
+    def test_other_events_are_rejected_before_using_credentials(self):
+        for event, ref in [('push', 'refs/heads/master'),
+                           ('pull_request', 'refs/heads/release/1.0.1'),
+                           ('workflow_dispatch', 'refs/heads/release/1.0.1'),
+                           ('push', 'refs/heads/release/invalid'),
+                           ('push', 'refs/tags/v1.0.1')]:
+            with self.subTest(event=event, ref=ref):
+                result = self.run_publish(GITHUB_EVENT_NAME=event, GITHUB_REF=ref)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('Publication requires', result.stderr)
+                self.assertFalse(self.log.exists())
+
+
+if __name__ == '__main__':
+    unittest.main()
