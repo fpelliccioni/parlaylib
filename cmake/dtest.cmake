@@ -28,6 +28,10 @@ option(ENABLE_MEMCHECK_TESTS  "Enable memcheck target for tests"    OFF)
 # Option to use libc++
 option(USE_LIBCXX "Use the libc++ standard library implementation" OFF)
 
+# Optimization level of the test executables. A build that needs another one
+# sets it here, since the level given to each test comes after the global flags.
+set(DTEST_OPTIMIZATION "-Og" CACHE STRING "Optimization flag of the test executables")
+
 # If MSAN is enabled, we need a path to an MSAN-instrumented libc++ binary
 set(LIBCXX_MSAN_PATH "" CACHE STRING "Path to MSAN-instrumented libc++ library")
 
@@ -203,7 +207,7 @@ function(add_dtest TESTNAME SOURCENAMES SANITIZER_FLAGS ABBRV TESTLIB ADDITIONAL
   if (NOT MSVC)
     target_compile_options(${TESTNAME}-${ABBRV} PRIVATE
       -Wall -Wextra -Wfatal-errors
-      -g -Og -fno-omit-frame-pointer
+      -g ${DTEST_OPTIMIZATION} -fno-omit-frame-pointer
       ${SANITIZER_FLAGS} ${DTEST_SANITIZER_BLACKLIST_COMMAND}
     )
   endif()
