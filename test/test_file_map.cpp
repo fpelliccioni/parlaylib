@@ -1,13 +1,17 @@
 #include "gtest/gtest.h"
 
 #include <fstream>
+#include <string>
 #include <numeric>
 #include <vector>
 
 #include <parlay/io.h>
 
+#include "temporary_file.h"
+
 TEST(TestFileMap, TestConstruction) {
-  std::string filename = "test.txt";
+  temporary_file temporary("a");
+  const std::string& filename = temporary.name;
   std::string contents = "Words, words, words";
   
   // Create a file first
@@ -20,7 +24,8 @@ TEST(TestFileMap, TestConstruction) {
 }
 
 TEST(TestFileMap, TestReadContents) {
-  std::string filename = "test.txt";
+  temporary_file temporary("a");
+  const std::string& filename = temporary.name;
   std::string contents = "Words, words, words";
   
   // Create a file first
@@ -35,7 +40,8 @@ TEST(TestFileMap, TestReadContents) {
 }
 
 TEST(TestFileMap, TestSubscript) {
-  std::string filename = "test.txt";
+  temporary_file temporary("a");
+  const std::string& filename = temporary.name;
   std::string contents = "Words, words, words";
   
   // Create a file first
@@ -52,7 +58,8 @@ TEST(TestFileMap, TestSubscript) {
 }
 
 TEST(TestFileMap, TestMoveConstruct) {
-  std::string filename = "test.txt";
+  temporary_file temporary("a");
+  const std::string& filename = temporary.name;
   std::string contents = "Words, words, words";
   
   // Create a file first
@@ -71,8 +78,10 @@ TEST(TestFileMap, TestMoveConstruct) {
 }
 
 TEST(TestFileMap, TestMoveAssign) {
-  std::string filename = "test.txt";
-  std::string filename2 = "test2.txt";
+  temporary_file temporary("a");
+  const std::string& filename = temporary.name;
+  temporary_file temporary2("b");
+  const std::string& filename2 = temporary2.name;
   std::string contents = "Words, words, words";
   
   // Create a file first
@@ -98,8 +107,10 @@ TEST(TestFileMap, TestMoveAssign) {
 }
 
 TEST(TestFileMap, TestSwap) {
-  std::string filename = "test.txt";
-  std::string filename2 = "test2.txt";
+  temporary_file temporary("a");
+  const std::string& filename = temporary.name;
+  temporary_file temporary2("b");
+  const std::string& filename2 = temporary2.name;
   std::string contents = "Words, words, words";
   std::string contents2 = "Stuff, stuff, stuff";
   
