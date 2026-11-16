@@ -251,3 +251,44 @@ TEST(TestParallel, TestMultipleSchedulers) {
 }
 
 #endif  // defined(PARLAY_USING_PARLAY_SCHEDULER)
+
+// What follows is about the scheduler a thread starts for itself, which only
+// Parlay's own scheduler has. The other back ends answer num_workers from
+// their own pool at any time.
+#if defined(PARLAY_USING_PARLAY_SCHEDULER)
+
+namespace {
+
+std::atomic<size_t> sum_after_scheduler{0};
+
+// Runs parallel code from its destructor
+struct ParallelOnDestruction {
+  ~ParallelOnDestruction() {
+    std::atomic<size_t> sum{0};
+    parlay::parallel_for(0, 10000, [&](size_t i) { sum.fetch_add(i, std::memory_order_relaxed); }, 1);
+    parlay::par_do([&]() { sum.fetch_add(1); }, [&]() { sum.fetch_add(2); });
+    sum_after_scheduler.store(sum.load() + parlay::num_workers() - 1);
+  }
+  void touch() const {}
+};
+
+}  // namespace
+
+// A thread's objects are destroyed in the reverse order of their construction,
+// so an object the thread made before it first ran parallel code outlives the
+// scheduler the thread started for itself. Its destructor can still call
+// parallel code, which then has no scheduler to run on.
+TEST(TestParallel, TestParallelCodeAfterTheThreadsSchedulerIsDestroyed) {
+  sum_after_scheduler.store(0);
+  std::thread thread([]() {
+    thread_local ParallelOnDestruction outlives_the_scheduler;
+    outlives_the_scheduler.touch();
+    std::atomic<size_t> sum{0};
+    parlay::parallel_for(0, 1000, [&](size_t i) { sum.fetch_add(i, std::memory_order_relaxed); }, 1);
+    ASSERT_EQ(sum.load(), 999u * 1000u / 2u);
+  });
+  thread.join();
+  ASSERT_EQ(sum_after_scheduler.load(), 9999u * 10000u / 2u + 3u);
+}
+
+#endif  // defined(PARLAY_USING_PARLAY_SCHEDULER)

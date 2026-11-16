@@ -169,23 +169,51 @@ inline unsigned int init_num_workers() {
 
 using scheduler_type = scheduler<WorkStealingJob>;
 
-extern inline scheduler_type& get_current_scheduler() {
+// Set once the scheduler a thread started for itself has been destroyed,
+// which happens when the thread ends. Objects that outlive it can still reach
+// parallel code: a static object of the main thread is destroyed after that
+// thread's thread-local objects, and its destructor may well call
+// parallel_for. Such calls run sequentially. A bool has no destructor, so it
+// stays readable for as long as the thread's storage does.
+inline thread_local bool local_scheduler_destroyed = false;
+
+// The scheduler a thread starts for itself the first time it runs parallel code
+struct local_scheduler_holder {
+  explicit local_scheduler_holder(size_t num_workers) : scheduler(num_workers) {}
+  ~local_scheduler_holder() { local_scheduler_destroyed = true; }
+  scheduler_type scheduler;
+};
+
+// The scheduler the calling thread runs parallel code on, started first if
+// the thread has none; null once the scheduler it started has been destroyed.
+//
+// A thread that already has a scheduler is answered from the same single
+// thread-local read as before; the flag is only looked at when there is none.
+extern inline scheduler_type* find_current_scheduler() {
   auto current_scheduler = scheduler_type::get_current_scheduler();
-  if (current_scheduler == nullptr) {
-    static thread_local scheduler_type local_scheduler(init_num_workers());
-    return local_scheduler;
-  }
+  if (current_scheduler != nullptr) return current_scheduler;
+  if (local_scheduler_destroyed) return nullptr;
+  static thread_local local_scheduler_holder local_scheduler(init_num_workers());
+  return std::addressof(local_scheduler.scheduler);
+}
+
+// Requires that the thread's own scheduler has not been destroyed
+extern inline scheduler_type& get_current_scheduler() {
+  auto current_scheduler = find_current_scheduler();
+  assert(current_scheduler != nullptr);
   return *current_scheduler;
 }
 
 }  // namespace internal
 
 inline size_t num_workers() {
-  return internal::get_current_scheduler().num_workers();
+  auto scheduler = internal::find_current_scheduler();
+  return scheduler ? scheduler->num_workers() : 1;
 }
 
 inline size_t worker_id() {
-  return internal::get_current_scheduler().worker_id();
+  auto scheduler = internal::find_current_scheduler();
+  return scheduler ? scheduler->worker_id() : 0;
 }
 
 template <typename F>
@@ -199,8 +227,13 @@ inline void parallel_for(size_t start, size_t end, F&& f, long granularity, bool
     for (size_t i = start; i < end; i++) f(i);
   }
   else if (end > start) {
-    fork_join_scheduler::parfor(internal::get_current_scheduler(), start, end,
-      std::forward<F>(f), static_cast<size_t>(granularity), conservative);
+    if (auto scheduler = internal::find_current_scheduler()) {
+      fork_join_scheduler::parfor(*scheduler, start, end,
+        std::forward<F>(f), static_cast<size_t>(granularity), conservative);
+    }
+    else {
+      for (size_t i = start; i < end; i++) f(i);
+    }
   }
 }
 
@@ -208,7 +241,13 @@ template <typename Lf, typename Rf>
 inline void par_do(Lf&& left, Rf&& right, bool conservative) {
   static_assert(std::is_invocable_v<Lf&&>);
   static_assert(std::is_invocable_v<Rf&&>);
-  return fork_join_scheduler::pardo(internal::get_current_scheduler(), std::forward<Lf>(left), std::forward<Rf>(right), conservative);
+  if (auto scheduler = internal::find_current_scheduler()) {
+    fork_join_scheduler::pardo(*scheduler, std::forward<Lf>(left), std::forward<Rf>(right), conservative);
+  }
+  else {
+    std::forward<Lf>(left)();
+    std::forward<Rf>(right)();
+  }
 }
 
 // Execute the given function f() on p threads inside its own private scheduler instance
