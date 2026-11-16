@@ -172,7 +172,7 @@ install(FILES "${PROJECT_BINARY_DIR}/ParlayConfig.cmake"
               "${PROJECT_BINARY_DIR}/ParlayConfigVersion.cmake"
         DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/parlay/cmake)
         
-install(DIRECTORY ${PARLAY_INCLUDE_DIR}/parlay DESTINATION include)
+install(DIRECTORY ${PARLAY_INCLUDE_DIR}/parlay DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
 # -------------------------------------------------------------------
 #                       Static analysis
