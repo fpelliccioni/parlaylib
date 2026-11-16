@@ -1,14 +1,18 @@
 #include "gtest/gtest.h"
 
 #include <fstream>
+#include <string>
 #include <sstream>
 
 #include <parlay/io.h>
+
+#include "temporary_file.h"
 #include <parlay/primitives.h>
 
 
 TEST(TestIO, TestCharsFromFile) {
-  std::string filename = "test.txt";
+  temporary_file temporary("a");
+  const std::string& filename = temporary.name;
   std::string contents = "Words, words, words\nAnother line";
   
   // Create a file first
@@ -30,7 +34,8 @@ TEST(TestIO, TestCharsFromFile) {
 }
 
 TEST(TestIO, TestCharsToFile) {
-  std::string filename = "test.txt";
+  temporary_file temporary("a");
+  const std::string& filename = temporary.name;
   std::string contents = "Words, words, words\nAnother line\n";
   
   parlay::chars_to_file(parlay::to_chars(contents), filename);

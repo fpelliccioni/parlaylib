@@ -121,6 +121,9 @@ jobs:
         run: bash ci/msan-libcxx.sh
       - name: Run unit tests under the sanitizer
         env:
+          # GoogleTest's build enables C as well, and the MemorySanitizer link
+          # flags name libc++, which only Clang's driver accepts.
+          CC: clang-21
           CXX: clang++-21
           SANITIZER: ${{ matrix.sanitizer }}
         run: bash ci/run-sanitizer.sh "$SANITIZER" build
