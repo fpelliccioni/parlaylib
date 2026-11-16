@@ -250,6 +250,50 @@ inline void par_do(Lf&& left, Rf&& right, bool conservative) {
   }
 }
 
+namespace internal {
+
+// The scheduler behind execute_shared: one for the process, started by the
+// first call and owned by no thread.
+//
+// It is never destroyed. A static object made before the first call is
+// destroyed after anything that call made, and its destructor may still call
+// execute_shared; the workers have to be there for it. They end with the
+// process.
+extern inline scheduler_type& get_shared_scheduler() {
+  static scheduler_type* const shared_scheduler =
+      new scheduler_type(init_num_workers(), scheduler_type::ownerless_t{});
+  return *shared_scheduler;
+}
+
+}  // namespace internal
+
+// Execute the given function f() on the scheduler that the whole process shares,
+// and return once it has finished.
+//
+// A thread that calls parallel_for or par_do without being a worker gets a
+// scheduler of its own, with its own threads. That suits a program whose main
+// thread does the parallel work. A program that reaches parallel code from many
+// threads (the threads of a server's pool, say) would end up with one scheduler
+// per thread; such threads call execute_shared instead, and everything f forks
+// runs on the same fixed set of workers whichever thread asked.
+//
+// The calling thread sleeps until f returns. Called from a thread of the shared
+// scheduler, f runs on that thread, as the shared worker it is. That holds
+// while the thread is working for a scheduler of its own inside
+// execute_with_scheduler too: handing f over would make the thread wait for a
+// scheduler it is part of, so it takes its place among the shared workers back
+// for the length of the call. f must not throw.
+template <typename F>
+void execute_shared(F&& f) {
+  auto& scheduler = internal::get_shared_scheduler();
+  if (scheduler.started_this_thread()) {
+    scheduler.run_as_own_worker(std::forward<F>(f));
+  }
+  else {
+    scheduler.run_from_outside(std::forward<F>(f));
+  }
+}
+
 // Execute the given function f() on p threads inside its own private scheduler instance
 //
 // The scheduler instance is destroyed upon completion and can not be re-used. Creating a
@@ -257,6 +301,24 @@ inline void par_do(Lf&& left, Rf&& right, bool conservative) {
 template <typename F>
 void execute_with_scheduler(unsigned int p, F&& f) {
   internal::scheduler_type scheduler(p);
+  std::invoke(std::forward<F>(f));
+}
+
+}  // namespace parlay
+
+#endif
+
+#if !defined(PARLAY_USING_PARLAY_SCHEDULER)
+
+#include <functional>
+#include <utility>
+
+namespace parlay {
+
+// The other schedulers already serve every thread from one pool, so there is
+// nothing to share that is not shared: f runs where it is called.
+template <typename F>
+void execute_shared(F&& f) {
   std::invoke(std::forward<F>(f));
 }
 

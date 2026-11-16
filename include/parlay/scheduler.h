@@ -9,7 +9,10 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>         // IWYU pragma: keep
+#include <condition_variable>
+#include <deque>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <type_traits>    // IWYU pragma: keep
 #include <utility>
@@ -94,6 +97,12 @@ struct scheduler {
 
   static inline thread_local workerInfo worker_info{};
 
+  // The scheduler that started the calling thread, if one did
+  static inline thread_local const scheduler* started_by = nullptr;
+
+  // The worker id it was started with
+  static inline thread_local worker_id_type started_as = 0;
+
  public:
 
   const worker_id_type num_threads;
@@ -104,28 +113,117 @@ struct scheduler {
     return worker_info.my_scheduler;
   }
 
+  // Tag for a scheduler that no thread owns: every worker is a thread the
+  // scheduler starts, and the thread that constructs it is not one of them.
+  // Work reaches such a scheduler through run_from_outside.
+  struct ownerless_t { explicit ownerless_t() = default; };
+
   explicit scheduler(size_t num_workers)
       : num_threads(num_workers),
         num_deques(num_threads),
         num_awake_workers(num_threads),
+        first_spawned_worker(1),
         parent_worker_info(std::exchange(worker_info, workerInfo{0, this})),
         deques(num_deques),
         attempts(num_deques),
         spawned_threads(),
         finished_flag(false) {
+    spawn_workers();
+  }
 
-    // Spawn num_threads many threads on startup
-    for (worker_id_type i = 1; i < num_threads; ++i) {
-      spawned_threads.emplace_back([&, i]() {
-        worker_info = {i, this};
-        worker();
-      });
-    }
+  // At least one worker: with none, nobody would ever take what is handed over.
+  scheduler(size_t num_workers, ownerless_t)
+      : num_threads(std::max<size_t>(1, num_workers)),
+        num_deques(num_threads),
+        num_awake_workers(num_threads),
+        first_spawned_worker(0),
+        parent_worker_info(),
+        deques(num_deques),
+        attempts(num_deques),
+        spawned_threads(),
+        finished_flag(false) {
+    spawn_workers();
   }
 
   ~scheduler() {
     shutdown();
-    worker_info = std::move(parent_worker_info);
+    if (first_spawned_worker != 0) {
+      worker_info = std::move(parent_worker_info);
+    }
+  }
+
+  // True if the calling thread is one of this scheduler's workers.
+  bool is_worker() const noexcept {
+    return worker_info.my_scheduler == this;
+  }
+
+  // True if the calling thread is one that this scheduler started. Unlike
+  // is_worker, this stays true while the thread works for another scheduler:
+  // execute_with_scheduler gives the thread that calls it a scheduler of its
+  // own for a while.
+  bool started_this_thread() const noexcept {
+    return started_by == this;
+  }
+
+  // Runs f() on the calling thread as the worker of this scheduler that it is.
+  // For a thread this scheduler started: if it is working for another scheduler
+  // just now, it takes its own place here back for the length of the call, so
+  // what f forks goes to this scheduler's workers, and returns to the other
+  // scheduler afterwards. Its deque here is as it left it, with the job it is
+  // in the middle of below whatever f pushes and pops. f must not throw.
+  template <typename F>
+  void run_as_own_worker(F&& f) {
+    assert(started_this_thread());
+    if (is_worker()) {
+      std::forward<F>(f)();
+      return;
+    }
+    workerInfo elsewhere = std::exchange(worker_info, workerInfo{started_as, this});
+    std::forward<F>(f)();
+    worker_info = std::move(elsewhere);
+  }
+
+  // Runs f() on a worker of this scheduler and returns once it has finished.
+  // For threads that are not workers of this scheduler: a worker has a deque
+  // to push the jobs it forks onto, and such a thread has none. f is handed to
+  // the workers as one job, the first idle one takes it, and everything f forks
+  // is scheduled among them as usual. The calling thread sleeps meanwhile.
+  //
+  // Any number of threads may call this at the same time. f must not throw.
+  template <typename F>
+  void run_from_outside(F&& f) {
+    assert(!is_worker());
+    // A thread of this scheduler that waited here would be waiting for itself
+    assert(!started_this_thread());
+    // The completion is signalled under a mutex that lives on this stack, and
+    // not through the job's own flag: the worker must be out of every object
+    // of this frame before the frame goes away, which it is once it has
+    // released the mutex.
+    std::mutex mutex;
+    std::condition_variable finished;
+    bool done = false;
+    auto run = [&]() {
+      std::forward<F>(f)();
+      std::lock_guard<std::mutex> lock(mutex);
+      done = true;
+      finished.notify_one();
+    };
+    auto job = make_job(run);
+    {
+      std::lock_guard<std::mutex> lock(outside_mutex);
+      outside_jobs.push_back(&job);
+      num_outside_jobs.fetch_add(1);
+    }
+#if PARLAY_ELASTIC_PARALLELISM
+    wake_up_a_worker();
+#endif
+    {
+      std::unique_lock<std::mutex> lock(mutex);
+      finished.wait(lock, [&]() { return done; });
+    }
+    // The job marks itself finished after f returns, which is the last thing
+    // the worker does with it.
+    job.wait();
   }
 
   // Push onto local stack.
@@ -179,6 +277,8 @@ struct scheduler {
 
   int num_deques;
   std::atomic<size_t> num_awake_workers;
+  // 1 when the constructing thread is worker 0, 0 when every worker is spawned
+  worker_id_type first_spawned_worker;
   workerInfo parent_worker_info;
   std::vector<internal::Deque<Job>> deques;
   std::vector<attempt> attempts;
@@ -187,6 +287,34 @@ struct scheduler {
 
   std::atomic<size_t> wake_up_counter{0};
   std::atomic<size_t> num_finished_workers{0};
+
+  // Jobs handed over by threads that are not workers, oldest first. The count
+  // is what a worker reads to know whether the queue is worth locking.
+  std::mutex outside_mutex;
+  std::deque<Job*> outside_jobs;
+  std::atomic<size_t> num_outside_jobs{0};
+
+  void spawn_workers() {
+    for (worker_id_type i = first_spawned_worker; i < num_threads; ++i) {
+      spawned_threads.emplace_back([&, i]() {
+        worker_info = {i, this};
+        started_by = this;
+        started_as = i;
+        worker();
+      });
+    }
+  }
+
+  // The oldest job handed over from outside, if there is one.
+  Job* get_outside_job() {
+    if (num_outside_jobs.load(std::memory_order_acquire) == 0) return nullptr;
+    std::lock_guard<std::mutex> lock(outside_mutex);
+    if (outside_jobs.empty()) return nullptr;
+    Job* job = outside_jobs.front();
+    outside_jobs.pop_front();
+    num_outside_jobs.fetch_sub(1);
+    return job;
+  }
 
   // Start an individual worker task, stealing work if no local
   // work is available. May go to sleep if no work is available
@@ -197,8 +325,20 @@ struct scheduler {
     wait_for_work();
 #endif
     while (!finished()) {
-      Job* job = get_job([&]() { return finished(); }, PARLAY_ELASTIC_PARALLELISM);
+      // Jobs from outside are taken here only, by a worker that has nothing
+      // of its own under way: a worker waiting at a join keeps to the jobs of
+      // the computation it is in.
+      Job* job = get_outside_job();
+      bool called_outside = false;
+      if (!job) {
+        job = get_job([&]() {
+          called_outside = has_outside_job();
+          return called_outside || finished();
+        }, PARLAY_ELASTIC_PARALLELISM);
+      }
       if (job)(*job)();
+      // Left the search for a job from outside: look for it, do not sleep.
+      else if (called_outside) continue;
 #if PARLAY_ELASTIC_PARALLELISM
       else if (!finished()) {
         // If no job was stolen, the worker should go to
@@ -226,6 +366,10 @@ struct scheduler {
       (*job)();
     }
     assert(done());
+  }
+
+  bool has_outside_job() const noexcept {
+    return num_outside_jobs.load(std::memory_order_acquire) != 0;
   }
 
   // Find a job, first trying local stack, then random steals.
@@ -296,7 +440,14 @@ struct scheduler {
   // Wait until notified to wake up
   void wait_for_work() {
     num_awake_workers.fetch_sub(1);
-    parlay::atomic_wait(&wake_up_counter, wake_up_counter.load());
+    // A job handed over from outside has nobody else to run it, so it must not
+    // be missed. The counter is read before the queue is looked at: a handover
+    // that is too late to be seen in the queue has not yet moved the counter,
+    // and moving it ends the wait below at once.
+    auto const seen = wake_up_counter.load();
+    if (!has_outside_job()) {
+      parlay::atomic_wait(&wake_up_counter, seen);
+    }
     num_awake_workers.fetch_add(1);
   }
 
@@ -315,13 +466,13 @@ struct scheduler {
     // We must spam wake all workers until they finish in
     // case any of them are just about to fall asleep, since
     // they might therefore miss the flag to finish
-    while (num_finished_workers.load() < num_threads - 1) {
+    while (num_finished_workers.load() < spawned_threads.size()) {
       wake_up_all_workers();
       std::this_thread::yield();
     }
 #endif
-    for (worker_id_type i = 1; i < num_threads; ++i) {
-      spawned_threads[i - 1].join();
+    for (auto& thread : spawned_threads) {
+      thread.join();
     }
   }
 };
