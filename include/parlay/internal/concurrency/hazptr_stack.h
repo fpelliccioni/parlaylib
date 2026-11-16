@@ -25,17 +25,22 @@ class hazptr_stack {
 
   struct Node {
     T t;
-    Node* next;
+    // Atomic because a node can be read and written at once: a pop that holds
+    // a hazard pointer to the top node reads its next while another pop, which
+    // took that node off first, retires it and the collector links it into its
+    // list through the same field. The first pop then fails its exchange and
+    // drops what it read, but the read itself must not be a data race.
+    std::atomic<Node*> next;
     size_t length;
 
     // Allow the intrusive garbage collector to use the node's own next pointer
     // instead of having to allocate its own memory to store the retired nodes
     friend Node* intrusive_get_next(Node* node) {
-      return node->next;
+      return node->next.load(std::memory_order_relaxed);
     }
 
     friend void intrusive_set_next(Node* node, Node* next_) {
-      node->next = next_;
+      node->next.store(next_, std::memory_order_relaxed);
     }
 
     explicit Node(T t_) noexcept(std::is_nothrow_move_constructible_v<T>)
@@ -57,11 +62,12 @@ class hazptr_stack {
   // This operation is safe to perform concurrently with other operations
   void push(T t) {
     auto p = new Node(std::move(t));
+    Node* h;
     do {
-      auto h = hazptr_instance().acquire(head);
-      p->next = h;
+      h = hazptr_instance().acquire(head);
+      p->next.store(h, std::memory_order_relaxed);
       p->length = h ? h->length + 1 : 1;
-    } while (!head.compare_exchange_weak(p->next, p));
+    } while (!head.compare_exchange_weak(h, p));
     hazptr_instance().release();
   }
 
@@ -74,7 +80,7 @@ class hazptr_stack {
     do {
       p = hazptr_instance().acquire(head);
       if (p == nullptr) return {};
-    } while (!head.compare_exchange_weak(p, p->next));
+    } while (!head.compare_exchange_weak(p, p->next.load(std::memory_order_relaxed)));
     auto val = std::make_optional(std::move(p->t));
     hazptr_instance().retire(p);
     hazptr_instance().release();
@@ -102,7 +108,7 @@ class hazptr_stack {
     Node* prev = nullptr;
     while (p) {
       prev = p;
-      p = p->next;
+      p = p->next.load(std::memory_order_relaxed);
       delete prev;
     }
   }
