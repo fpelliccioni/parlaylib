@@ -52,6 +52,14 @@ MSan builds an instrumented [LLVM 21.1.8](https://github.com/llvm/llvm-project/r
 own upstream tests and benchmarks. The script refuses to run `memory` without
 `MSAN_LIBCXX_ROOT` pointing to such an installation.
 
+The MSan job compiles the tests at `-O1` rather than the `-Og` the other jobs use
+(`DTEST_OPTIMIZATION`). With Clang 21, a test compiled at `-Og` reports a use after
+destruction inside the stream GoogleTest writes to while it initializes its
+globals, before `main`, so no test runs. A test that only includes GoogleTest
+reproduces it, and the same source compiled at `-O0`, `-O1` or `-O2` reports
+nothing: the report comes from the code generated at that level, not from the
+program. No MemorySanitizer check is turned off.
+
 No sanitizer findings are suppressed or allowed to fail; `.sanitizer-blacklist`
 has no entries. Any sanitizer failure blocks publication.
 

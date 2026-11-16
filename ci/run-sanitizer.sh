@@ -29,6 +29,12 @@ case "$sanitizer" in
     options=(
       "-DCMAKE_CXX_FLAGS=-fsanitize=memory -fsanitize-memory-track-origins=2 -fno-sanitize-recover=all -fno-omit-frame-pointer -stdlib=libc++ -nostdinc++ -isystem $MSAN_LIBCXX_ROOT/include/c++/v1"
       "-DCMAKE_EXE_LINKER_FLAGS=-stdlib=libc++ -L$MSAN_LIBCXX_ROOT/lib -Wl,-rpath,$MSAN_LIBCXX_ROOT/lib"
+      # Not the tests' usual -Og. With Clang 21, a test compiled at -Og reports
+      # a use after destruction in the stream GoogleTest writes to while its
+      # globals are initialized, before main. The same code compiled at -O0,
+      # -O1 or -O2 reports nothing, so it is the code generated at that level
+      # and not the program. Every check stays on.
+      -DDTEST_OPTIMIZATION=-O1
     )
     ;;
   *)

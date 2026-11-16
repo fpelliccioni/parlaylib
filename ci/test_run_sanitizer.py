@@ -78,6 +78,8 @@ if os.environ.get('FAIL_PHASE') == phase: sys.exit(3)
         flags = next(a for a in configure if a.startswith('-DCMAKE_CXX_FLAGS='))
         linker = next(a for a in configure if a.startswith('-DCMAKE_EXE_LINKER_FLAGS='))
         self.assertIn('-fsanitize=memory', flags)
+        # The tests are not compiled at their usual -Og under MemorySanitizer.
+        self.assertIn('-DDTEST_OPTIMIZATION=-O1', configure)
         self.assertIn('-fno-sanitize-recover=all', flags)
         self.assertIn(f'-nostdinc++ -isystem {self.libcxx}/include/c++/v1', flags)
         self.assertIn(f'-L{self.libcxx}/lib', linker)
