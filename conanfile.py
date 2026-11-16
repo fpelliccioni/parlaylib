@@ -26,7 +26,7 @@ class ParlayLibConan(ConanFile):
         self.version = match.group(1)
 
     def validate(self):
-        check_min_cppstd(self, "17")
+        check_min_cppstd(self, "23")
 
     def package(self):
         copy(self, "*", src=os.path.join(self.source_folder, "include", "parlay"),

@@ -1,9 +1,10 @@
 # Continuous integration and packages
 
-ParlayLib itself still requires only C++17. CI uses C++23 as its baseline and also
-builds the unit tests, the examples and the consumer in C++26 mode with Clang; that
-checks compiler support for this code, not completeness of the C++26 standard
-library. One additional Clang build uses C++17 so the declared minimum stays checked.
+This repository's baseline is C++23. CI also builds the unit tests, the examples
+and the consumer in C++26 mode with Clang; that checks compiler support for this
+code, not completeness of the C++26 standard library. Older standards are not
+built here: the headers have not been changed to need more than the C++17 the
+upstream project asks for, but nothing checks that they still work with it.
 
 The GCC build and the publication consumer use the
 [official GCC 16.2.0 image](https://hub.docker.com/_/gcc), pinned by manifest digest.
@@ -109,7 +110,7 @@ bash ci/run-sanitizer.sh thread build-tsan
 
 The CMake package is unchanged: `find_package(Parlay CONFIG REQUIRED)` and the
 target `Parlay::parlay`. The Conan package `parlaylib` generates the same file and
-target names through CMakeDeps, requires C++17 or later, and contains only
+target names through CMakeDeps, requires C++23 or later, and contains only
 `include/parlay/` and the license. It models the default configuration; the
 scheduler and elastic-parallelism options of the CMake build are not recipe options.
 

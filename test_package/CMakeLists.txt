@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.14)
 project(consumer LANGUAGES CXX)
 if(NOT CMAKE_CXX_STANDARD)
-  set(CMAKE_CXX_STANDARD 17)
+  set(CMAKE_CXX_STANDARD 23)
 endif()
 find_package(Parlay CONFIG REQUIRED)
 add_executable(consumer consumer.cpp)
