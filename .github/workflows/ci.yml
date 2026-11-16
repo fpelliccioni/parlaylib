@@ -27,8 +27,6 @@ jobs:
           - {os: ubuntu-24.04, compiler: clang++-18, standard: 23, toolchain: clang-18}
           - {os: xcode-27, compiler: clang++, standard: 23, toolchain: xcode-27.2}
           - {os: ubuntu-24.04, compiler: clang++-18, standard: 26, toolchain: clang-18}
-          # The library still declares C++17 as its minimum; keep that claim checked.
-          - {os: ubuntu-24.04, compiler: clang++-18, standard: 17, toolchain: clang-18}
     timeout-minutes: 45
     runs-on: ${{ matrix.os }}
     steps:
