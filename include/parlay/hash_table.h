@@ -59,6 +59,22 @@ class hashtable {
   }
   bool lessEqIndex(index a, index b) { return a == b || lessIndex(a, b); }
 
+  // Reads a slot that other workers may be changing through HASH::cas at the
+  // same time. The cas works on the slot as a std::atomic, so the read has to
+  // as well: a plain read next to an atomic write is a data race. The order is
+  // relaxed, like that of the cas in hash_numeric, so the read is the same
+  // instruction as before and promises no more than before. Types that
+  // std::atomic cannot hold without a lock keep the plain read; their HASH
+  // supplies a cas of its own and the table cannot know what it excludes.
+  eType load(index i) const {
+    if constexpr (std::atomic<eType>::is_always_lock_free &&
+                  sizeof(std::atomic<eType>) == sizeof(eType)) {
+      return reinterpret_cast<const std::atomic<eType>*>(&TA[i])->load(std::memory_order_relaxed);
+    } else {
+      return TA[i];
+    }
+  }
+
  public:
   // Size is the maximum number of values the hash table will hold.
   // Overfilling the table could put it into an infinite loop.
@@ -78,7 +94,7 @@ class hashtable {
   bool insert(eType v) {
     index i = firstIndex(hashStruct.getKey(v));
     while (true) {
-      eType c = TA[i];
+      eType c = load(i);
       if (c == empty) {
         if (hashStruct.cas(&TA[i], c, v)) return true;
       } else {
@@ -105,7 +121,7 @@ class hashtable {
   bool update(eType v) {
     index i = firstIndex(hashStruct.getKey(v));
     while (true) {
-      eType c = TA[i];
+      eType c = load(i);
       if (c == empty) {
         if (hashStruct.cas(&TA[i], c, v)) return true;
       } else {
@@ -133,7 +149,7 @@ class hashtable {
 
     // find first element less than or equal to v in priority order
     index j = i;
-    eType c = TA[j];
+    eType c = load(j);
 
     if (c == empty) return true;
 
@@ -141,7 +157,7 @@ class hashtable {
     while ((cmp = (c == empty) ? 1 : hashStruct.cmp(v, hashStruct.getKey(c))) <
            0) {
       j = incrementIndex(j);
-      c = TA[j];
+      c = load(j);
     }
     while (true) {
       // Invariants:
@@ -157,7 +173,7 @@ class hashtable {
         // moving before h(v)
         if (j == i) return true;
         j = decrementIndex(j);
-        c = TA[j];
+        c = load(j);
         cmp = (c == empty) ? 1 : hashStruct.cmp(v, hashStruct.getKey(c));
       } else {  // found v at location j (at least at some prior time)
 
@@ -168,14 +184,14 @@ class hashtable {
         // Makes use of the fact that values in a cell can only decrease
         // during a delete phase as elements are moved from the right to left.
         index jj = incrementIndex(j);
-        eType x = TA[jj];
+        eType x = load(jj);
         while (x != empty && lessIndex(j, firstIndex(hashStruct.getKey(x)))) {
           jj = incrementIndex(jj);
-          x = TA[jj];
+          x = load(jj);
         }
         index jjj = decrementIndex(jj);
         while (jjj != j) {
-          eType y = TA[jjj];
+          eType y = load(jjj);
           if (y == empty || !lessIndex(j, firstIndex(hashStruct.getKey(y)))) {
             x = y;
             jj = jjj;
@@ -197,7 +213,7 @@ class hashtable {
           j = jj;
           i = firstIndex(v);
         }
-        c = TA[j];
+        c = load(j);
         cmp = (c == empty) ? 1 : hashStruct.cmp(v, hashStruct.getKey(c));
       }
     }
@@ -208,7 +224,7 @@ class hashtable {
   // due to prioritization, can quit early if v is greater than cell
   eType find(kType v) {
     index h = firstIndex(v);
-    eType c = TA[h];
+    eType c = load(h);
     while (true) {
       if (c == empty) return empty;
       int cmp = hashStruct.cmp(v, hashStruct.getKey(c));
@@ -219,7 +235,7 @@ class hashtable {
           return c;
       }
       h = incrementIndex(h);
-      c = TA[h];
+      c = load(h);
     }
   }
 
@@ -237,7 +253,7 @@ class hashtable {
 
   index findIndex(kType v) {
     index h = firstIndex(v);
-    eType c = TA[h];
+    eType c = load(h);
     while (true) {
       if (c == empty) return -1;
       int cmp = hashStruct.cmp(v, hashStruct.getKey(c));
@@ -248,7 +264,7 @@ class hashtable {
           return h;
       }
       h = incrementIndex(h);
-      c = TA[h];
+      c = load(h);
     }
   }
 
